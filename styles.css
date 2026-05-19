@@ -13,7 +13,7 @@
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   overflow: hidden;
   user-select: none;
-  transition: width 0.2s;
+  transition: width 0.2s, border-color 0.3s, box-shadow 0.3s;
 }
 
 #ccm-widget.ccm-collapsed .ccm-body {
@@ -22,6 +22,22 @@
 
 #ccm-widget.ccm-collapsed {
   width: 64px;
+}
+
+/* Pulse animation for danger/critical */
+#ccm-widget.ccm-pulse {
+  animation: ccm-pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes ccm-pulse-glow {
+  0%, 100% {
+    border-color: #333355;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  }
+  50% {
+    border-color: #ef4444;
+    box-shadow: 0 4px 24px rgba(239, 68, 68, 0.3);
+  }
 }
 
 .ccm-header {
@@ -89,7 +105,17 @@
 }
 
 .ccm-bar-fill.ccm-danger {
+  background: linear-gradient(90deg, #f97316, #fb923c);
+}
+
+.ccm-bar-fill.ccm-critical {
   background: linear-gradient(90deg, #ef4444, #f87171);
+  animation: ccm-bar-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes ccm-bar-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 .ccm-stats {
@@ -106,6 +132,52 @@
   color: #8888aa;
   line-height: 1.6;
   word-break: break-word;
+}
+
+/* Alert messages */
+.ccm-alert {
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: none;
+}
+
+.ccm-alert:hover {
+  opacity: 0.8;
+}
+
+.ccm-alert-watch {
+  background: rgba(167, 139, 250, 0.15);
+  color: #a78bfa;
+  border: 1px solid rgba(167, 139, 250, 0.3);
+}
+
+.ccm-alert-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.ccm-alert-danger {
+  background: rgba(249, 115, 22, 0.15);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.3);
+}
+
+.ccm-alert-critical {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.ccm-alert-compression {
+  background: rgba(168, 85, 247, 0.2);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.4);
 }
 
 .ccm-rate {

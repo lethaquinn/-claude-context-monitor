@@ -1,5 +1,5 @@
 // Content script: injects interceptor, estimates tokens from DOM + SSE deltas,
-// and renders the context monitor widget.
+// renders context monitor widget, and warns before compression.
 
 (function () {
   // --- Inject into page world ---
@@ -9,7 +9,6 @@
   (document.head || document.documentElement).appendChild(script);
 
   // --- Token estimator ---
-  // Rough heuristic: CJK ≈ 1.5 tokens/char, Latin ≈ 0.25 tokens/char, mixed ≈ 0.6
   function estimateTokens(text) {
     if (!text) return 0;
     let cjk = 0;
@@ -33,34 +32,23 @@
 
   // --- Read conversation from DOM ---
   function readConversationTokens() {
-    // claude.ai uses content-visibility:auto on message containers,
-    // which makes innerText return empty for off-screen messages.
-    // Use textContent instead — it reads regardless of visibility.
-
     let totalText = "";
-
-    // Primary: grab the autoscroll container (holds all message turns)
     const scrollContainer = document.querySelector(
       "[data-autoscroll-container='true']"
     );
     if (scrollContainer) {
       totalText = scrollContainer.textContent || "";
     }
-
-    // Fallback: #main-content
     if (!totalText.trim()) {
       const main = document.querySelector("#main-content");
       if (main) totalText = main.textContent || "";
     }
-
-    // Fallback 2: anything with the conversation classes
     if (!totalText.trim()) {
       const el =
         document.querySelector("[class*='conversation']") ||
         document.querySelector("[role='main']");
       if (el) totalText = el.textContent || "";
     }
-
     return {
       text: totalText,
       tokens: estimateTokens(totalText),
@@ -77,6 +65,13 @@
     rateLimit: null,
     inputTokensFromAPI: null,
     outputTokensFromAPI: null,
+    // compression detection
+    prevCharCount: 0,
+    compressionDetected: false,
+    compressionCount: 0,
+    // alert state
+    alertLevel: "normal", // normal | watch | warning | danger | critical
+    alertDismissed: false,
   };
 
   const MODEL_LIMITS = {
@@ -87,6 +82,25 @@
     "claude-opus-4-6-20250725": 200000,
   };
   const DEFAULT_LIMIT = 200000;
+
+  // --- Alert thresholds ---
+  const THRESHOLDS = {
+    watch: 0.5,    // 50% — gentle note
+    warning: 0.65, // 65% — yellow, compression approaching
+    danger: 0.75,  // 75% — orange, compression likely soon
+    critical: 0.85, // 85% — red, compression imminent or happening
+  };
+
+  const ALERT_MESSAGES = {
+    normal: "",
+    watch: "50% — context half used",
+    warning: "65% — compression zone approaching",
+    danger: "75% — compression likely soon",
+    critical: "85% — compression imminent",
+  };
+
+  // compression: if char count drops >30% between reads, something got compressed
+  const COMPRESSION_DROP_RATIO = 0.3;
 
   // --- Listen for messages from inject.js ---
   window.addEventListener("message", (e) => {
@@ -156,6 +170,7 @@
         </div>
         <div class="ccm-stats" id="ccm-stats">loading...</div>
         <div class="ccm-detail" id="ccm-detail"></div>
+        <div class="ccm-alert" id="ccm-alert"></div>
         <div class="ccm-rate" id="ccm-rate"></div>
       </div>
     `;
@@ -172,11 +187,16 @@
       updateWidget();
     });
 
+    // dismiss alert on click
+    widget.querySelector("#ccm-alert").addEventListener("click", () => {
+      state.alertDismissed = true;
+      widget.querySelector("#ccm-alert").style.display = "none";
+      widget.classList.remove("ccm-pulse");
+    });
+
     makeDraggable(widget);
 
-    // initial read
     setTimeout(updateWidget, 1500);
-    // periodic refresh
     setInterval(updateWidget, 15000);
   }
 
@@ -186,27 +206,67 @@
     const conv = readConversationTokens();
     const limit = MODEL_LIMITS[state.model] || DEFAULT_LIMIT;
 
-    // best estimate of context usage
-    // If API gave us input tokens, use that; otherwise estimate from DOM
+    // --- Compression detection ---
+    if (
+      state.prevCharCount > 500 &&
+      conv.charCount > 0 &&
+      conv.charCount < state.prevCharCount * (1 - COMPRESSION_DROP_RATIO)
+    ) {
+      state.compressionDetected = true;
+      state.compressionCount++;
+      state.alertDismissed = false;
+      // reset output estimate since context was compressed
+      state.totalOutputTokensEstimated = 0;
+      state.inputTokensFromAPI = null;
+      state.outputTokensFromAPI = null;
+    }
+    state.prevCharCount = conv.charCount;
+
+    // --- Token calculation ---
     const inputTokens = state.inputTokensFromAPI || conv.tokens;
-    const outputTokens = state.outputTokensFromAPI || state.totalOutputTokensEstimated;
+    const outputTokens =
+      state.outputTokensFromAPI || state.totalOutputTokensEstimated;
     const totalUsed = inputTokens + outputTokens;
     const pct = Math.min((totalUsed / limit) * 100, 100);
+    const ratio = totalUsed / limit;
     const remaining = Math.max(limit - totalUsed, 0);
 
-    // bar
+    // --- Alert level ---
+    let newLevel = "normal";
+    if (ratio >= THRESHOLDS.critical) newLevel = "critical";
+    else if (ratio >= THRESHOLDS.danger) newLevel = "danger";
+    else if (ratio >= THRESHOLDS.warning) newLevel = "warning";
+    else if (ratio >= THRESHOLDS.watch) newLevel = "watch";
+
+    if (newLevel !== state.alertLevel) {
+      state.alertDismissed = false;
+      state.alertLevel = newLevel;
+    }
+
+    // --- Bar ---
     const bar = widget.querySelector("#ccm-bar-fill");
     bar.style.width = pct + "%";
     bar.className = "ccm-bar-fill";
-    if (pct > 80) bar.classList.add("ccm-danger");
-    else if (pct > 50) bar.classList.add("ccm-warning");
+    if (newLevel === "critical") bar.classList.add("ccm-critical");
+    else if (newLevel === "danger") bar.classList.add("ccm-danger");
+    else if (newLevel === "warning") bar.classList.add("ccm-warning");
 
-    // stats
+    // --- Pulse animation for danger/critical ---
+    if (
+      (newLevel === "danger" || newLevel === "critical") &&
+      !state.alertDismissed
+    ) {
+      widget.classList.add("ccm-pulse");
+    } else {
+      widget.classList.remove("ccm-pulse");
+    }
+
+    // --- Stats ---
     const apiTag = state.inputTokensFromAPI ? "" : " ~";
     widget.querySelector("#ccm-stats").textContent =
       `${apiTag}${fmtK(totalUsed)} / ${fmtK(limit)} (${pct.toFixed(1)}%)`;
 
-    // detail
+    // --- Detail ---
     const details = [
       `in: ${apiTag}${fmtK(inputTokens)}`,
       `out: ${apiTag}${fmtK(outputTokens)}`,
@@ -221,13 +281,30 @@
     }
     widget.querySelector("#ccm-detail").innerHTML = details.join(" · ");
 
-    // rate limit
+    // --- Alert ---
+    const alertEl = widget.querySelector("#ccm-alert");
+    if (state.compressionDetected) {
+      alertEl.textContent = `context compressed (#${state.compressionCount}) — estimates reset`;
+      alertEl.className = "ccm-alert ccm-alert-compression";
+      alertEl.style.display = "block";
+      state.compressionDetected = false;
+    } else if (newLevel !== "normal" && !state.alertDismissed) {
+      alertEl.textContent = ALERT_MESSAGES[newLevel];
+      alertEl.className = `ccm-alert ccm-alert-${newLevel}`;
+      alertEl.style.display = "block";
+    } else {
+      alertEl.style.display = "none";
+    }
+
+    // --- Rate limit ---
     const rateEl = widget.querySelector("#ccm-rate");
     if (state.rateLimit?.windows) {
       const w = state.rateLimit.windows;
       const parts = [];
-      if (w["5h"]) parts.push(`5h: ${(w["5h"].utilization * 100).toFixed(0)}%`);
-      if (w["7d"]) parts.push(`7d: ${(w["7d"].utilization * 100).toFixed(0)}%`);
+      if (w["5h"])
+        parts.push(`5h: ${(w["5h"].utilization * 100).toFixed(0)}%`);
+      if (w["7d"])
+        parts.push(`7d: ${(w["7d"].utilization * 100).toFixed(0)}%`);
       rateEl.textContent = `rate limit: ${parts.join(" · ")}`;
       rateEl.style.display = "block";
     } else {
