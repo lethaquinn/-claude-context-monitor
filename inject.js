@@ -1,120 +1,99 @@
-// Injected into claude.ai's main world to intercept fetch responses.
-// Communicates back to content script via window.postMessage.
+// Injected into claude.ai's main world to intercept SSE streaming.
+// Since claude.ai does NOT expose token usage in SSE, we:
+// 1. Count output chars from content_block_delta events
+// 2. Extract message_limit (rate limit) info
+// 3. Signal turn boundaries (message_stop)
 
 (function () {
+  console.log("[CCM inject] loaded");
+
   const originalFetch = window.fetch;
 
   window.fetch = async function (...args) {
-    const response = await originalFetch.apply(this, args);
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+    const response = await originalFetch.apply(this, args);
 
-    if (!isCompletionEndpoint(url)) return response;
+    if (!isStreamEndpoint(url)) return response;
 
-    const cloned = response.clone();
-    parseSSEStream(cloned.body).catch(() => {});
+    console.log("[CCM inject] intercepted:", url.slice(0, 100));
+    post("CCM_TURN_START", {});
+
+    try {
+      const cloned = response.clone();
+      const reader = cloned.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        (async () => {
+          let buffer = "";
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || "";
+              for (const line of lines) processLine(line.trim());
+            }
+            if (buffer.trim()) processLine(buffer.trim());
+          } catch (e) {
+            console.log("[CCM inject] stream error:", e.message);
+          }
+        })();
+      }
+    } catch {}
+
     return response;
   };
 
-  function isCompletionEndpoint(url) {
+  function isStreamEndpoint(url) {
     return (
       url.includes("/completion") ||
-      url.includes("/chat_conversations") ||
-      url.includes("/api/append_message") ||
-      url.includes("/api/organizations")
+      url.includes("/retry_completion") ||
+      url.includes("/append_message")
     );
   }
 
-  async function parseSSEStream(body) {
-    if (!body) return;
-    const reader = body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+  function processLine(line) {
+    if (!line.startsWith("data: ")) return;
+    const raw = line.slice(6).trim();
+    if (!raw || raw === "[DONE]") return;
+    try {
+      const d = JSON.parse(raw);
+      route(d);
+    } catch {}
+  }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+  function route(d) {
+    const t = d.type;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+    if (t === "message_start" && d.message) {
+      post("CCM_MSG_START", {
+        model: d.message.model || null,
+        usage: d.message.usage || null,
+      });
+    }
 
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const raw = line.slice(6).trim();
-        if (!raw || raw === "[DONE]") continue;
+    if (t === "content_block_delta" && d.delta?.text) {
+      post("CCM_DELTA", { text: d.delta.text });
+    }
 
-        try {
-          const data = JSON.parse(raw);
-          handleSSEEvent(data);
-        } catch {
-          // not JSON, skip
-        }
-      }
+    if (t === "message_delta") {
+      post("CCM_MSG_DELTA", {
+        usage: d.usage || null,
+        stop_reason: d.delta?.stop_reason || null,
+      });
+    }
+
+    if (t === "message_limit") {
+      post("CCM_RATE_LIMIT", { message_limit: d.message_limit });
+    }
+
+    if (t === "message_stop") {
+      post("CCM_TURN_END", {});
     }
   }
 
-  function handleSSEEvent(data) {
-    // Claude.ai SSE format varies — try multiple known shapes
-
-    // Shape 1: usage in message_delta or message_stop
-    if (data.type === "message_stop" || data.type === "message_delta") {
-      if (data.usage) {
-        postUsage(data.usage);
-      }
-    }
-
-    // Shape 2: usage at top level
-    if (data.usage) {
-      postUsage(data.usage);
-    }
-
-    // Shape 3: nested in message
-    if (data.message?.usage) {
-      postUsage(data.message.usage);
-    }
-
-    // Shape 4: completion event with model info
-    if (data.model) {
-      window.postMessage(
-        { type: "CCM_MODEL", model: data.model },
-        "*"
-      );
-    }
-
-    // Shape 5: error events
-    if (data.type === "error") {
-      window.postMessage(
-        { type: "CCM_ERROR", error: data.error },
-        "*"
-      );
-    }
-
-    // Debug: forward all SSE events so we can inspect the format
-    window.postMessage(
-      { type: "CCM_RAW_EVENT", data: summarize(data) },
-      "*"
-    );
-  }
-
-  function postUsage(usage) {
-    window.postMessage(
-      {
-        type: "CCM_USAGE",
-        usage: {
-          input_tokens: usage.input_tokens ?? null,
-          output_tokens: usage.output_tokens ?? null,
-          cache_creation_input_tokens:
-            usage.cache_creation_input_tokens ?? null,
-          cache_read_input_tokens:
-            usage.cache_read_input_tokens ?? null,
-        },
-      },
-      "*"
-    );
-  }
-
-  function summarize(obj) {
-    const s = JSON.stringify(obj);
-    return s.length > 500 ? s.slice(0, 500) + "…" : s;
+  function post(type, payload) {
+    window.postMessage({ type, ...payload }, "*");
   }
 })();

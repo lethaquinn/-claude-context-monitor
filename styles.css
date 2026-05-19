@@ -3,7 +3,7 @@
   bottom: 16px;
   right: 16px;
   z-index: 999999;
-  width: 260px;
+  width: 280px;
   background: #1a1a2e;
   border: 1px solid #333355;
   border-radius: 10px;
@@ -13,7 +13,7 @@
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
   overflow: hidden;
   user-select: none;
-  transition: width 0.2s, height 0.2s;
+  transition: width 0.2s;
 }
 
 #ccm-widget.ccm-collapsed .ccm-body {
@@ -46,15 +46,20 @@
   font-size: 10px;
 }
 
-.ccm-toggle {
+.ccm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ccm-btn {
   cursor: pointer;
   color: #666;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
   padding: 0 2px;
 }
 
-.ccm-toggle:hover {
+.ccm-btn:hover {
   color: #a78bfa;
 }
 
@@ -101,4 +106,13 @@
   color: #8888aa;
   line-height: 1.6;
   word-break: break-word;
+}
+
+.ccm-rate {
+  text-align: center;
+  font-size: 9px;
+  color: #6b6b8a;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #2a2a4a;
 }
