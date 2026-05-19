@@ -105,6 +105,7 @@
     // v0.4 additions
     conversationId: getConversationId(),
     turnTokenHistory: [],
+    prevTurnTokenSnapshot: null, // DOM tokens at end of last turn
     systemPromptOffset: loadSystemPromptOffset(),
     collapsed: false,
     settingsOpen: false,
@@ -138,6 +139,7 @@
     state.alertLevel = "normal";
     state.alertDismissed = false;
     state.turnTokenHistory = [];
+    state.prevTurnTokenSnapshot = null;
   }
 
   // --- Conversation switch detection ---
@@ -213,18 +215,22 @@
         state.totalOutputTokensEstimated += turnTokens;
         state.turnCount++;
 
-        // record per-turn cost (input delta + output)
+        // record per-turn cost: delta in DOM tokens + output tokens
         const conv = readConversationTokens();
-        const inputNow =
-          state.inputTokensFromAPI ||
-          conv.tokens + state.systemPromptOffset;
-        const turnCost =
-          state.turnTokenHistory.length === 0
-            ? inputNow + turnTokens
-            : turnTokens +
-              (inputNow -
-                (state.turnTokenHistory.reduce((a, b) => a + b, 0) || 0));
-        state.turnTokenHistory.push(Math.max(turnCost, turnTokens));
+        const domTokensNow = conv.tokens + state.systemPromptOffset;
+
+        let turnCost;
+        if (state.prevTurnTokenSnapshot === null) {
+          // first turn since load: only count user message + response,
+          // not the entire pre-existing conversation
+          turnCost = turnTokens + estimateTokens("x".repeat(state.currentOutputChars > 0 ? 200 : 0));
+        } else {
+          // subsequent turns: measure how much DOM grew + output
+          const inputDelta = Math.max(domTokensNow - state.prevTurnTokenSnapshot, 0);
+          turnCost = inputDelta + turnTokens;
+        }
+        state.prevTurnTokenSnapshot = domTokensNow;
+        state.turnTokenHistory.push(Math.max(turnCost, 100));
 
         state.currentOutputChars = 0;
         updateWidget();
